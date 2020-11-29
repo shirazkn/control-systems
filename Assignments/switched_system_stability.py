@@ -14,6 +14,9 @@ sos_lyapunov_feasibility :
 Finding a sum-of-squares lyapunov function for given non-linear system
 by reformulating the SOS feasibility problem as an SDP problem
 
+piecewise_quadratic_lyapunov :
+Showing asymptotic stability of a switching linear system, by finding a
+a piecewise-quadratic Lyapunov which is continuous at switching surface
 """
 
 import cvxpy as cp
@@ -115,7 +118,9 @@ def common_lyapunov_conditional_trajectories(results, resolution=10, delta=0.005
     return
 
 
-def sos_lyapunov_feasibility(gamma = 0.0):
+def sos_lyapunov_feasibility(gamma=0.0):
+    # gamma is the tolerance of positive definiteness of constraint,
+    # i.e., gamma=0.0 implies positive semi-definite constraint (insufficient)
     Q_tilde = cp.Variable((2, 2))
     Q = Q_tilde + Q_tilde.T
     c11 = Q[0][0]
@@ -174,6 +179,128 @@ def common_lyapunov():
     P = np.linalg.inv(Q.value)
     K = Y @ P
     return {"P": P, "K": K.value, "Problem": prob}
+
+
+def piecewise_quadratic_lyapunov(gamma=1.0):
+    # Based on `Johansson & Rantzer, Computation of Piecewise Quadratic Lyapunov Functions for Hybrid Systems, 1998`
+    # gamma is the tolerance of positive definiteness of constraints,
+    # i.e., gamma=0.0 implies positive semi-definite constraints (insufficient)
+
+    M_tilde = cp.Variable((2, 2))
+    M = M_tilde + M_tilde.T
+
+    U_tilde = []
+    U = []
+    for i in range(4):
+        U_tilde.append(cp.Variable((2, 2)))
+        U.append(U_tilde[-1] + U_tilde[-1].T)
+
+    W_tilde = []
+    W = []
+    for i in range(4):
+        W_tilde.append(cp.Variable((2, 2)))
+        W.append(W_tilde[-1] + W_tilde[-1].T)
+
+    A1 = np.array([[-1, 10], [-100, -1]])
+    A2 = np.array([[-1, 100], [-10, -1]])
+    A = [A1, A2, A1, A2]  # Auxiliary modes added to ensure domain of each mode is a convex polytope
+
+    # Switching surfaces
+    E = [
+        np.array([[0, 1], [1, 0]]),
+        np.array([[0, 1], [-1, 0]]),
+        np.array([[0, -1], [-1, 0]]),
+        np.array([[0, -1], [1, 0]])
+    ]
+    F = E
+
+    P = []
+    for i in range(4):
+        P.append(F[i].T @ M @ F[i])
+
+    ident = np.identity(2)
+
+    constraints = []
+    for i in range(4):
+        constraints.append(P[i] - gamma*ident >> 0)
+        constraints.append(P[i] - E[i].T @ W[i] @ E[i] - gamma*ident >> 0)
+        constraints.append(-1 * (A[i].T @ P[i] + P[i] @ A[i] + E[i].T @ U[i] @ E[i]) - gamma*0.1*ident >> 0)
+
+        # Non-negativity of U and W
+        for j in range(2):
+            for k in range(2):
+                constraints.append(U[i][j][k] >= 0)
+                constraints.append(W[i][j][k] >= 0)
+
+    objective = cp.Minimize(0.0)
+    prob = cp.Problem(objective, constraints)
+    prob.solve()
+
+    return {"M": M.value, "P": [_P.value for _P in P], "U": [_U.value for _U in U],
+            "W": [_W.value for _W in W], "E": E, "Problem": prob}
+
+
+def piecewise_quadratic_lyapunov_trajectories(results, resolution=100, delta=0.005, size=100.0, contour_levels=5, initial_values=[]):
+    # Plots trajectories of previous problem
+    M, P, U, W, E = list(results.values())[:5]
+    A1 = np.array([[-1, 10], [-100, -1]])
+    A2 = np.array([[-1, 100], [-10, -1]])
+
+    plt.figure()
+
+    # CONTOURS
+    # Adding an epsilon to the grid to avoid having points on the axes!
+    x_values = np.linspace(-size/2 + np.pi/20.0, size/2, resolution)
+    y_values = x_values.copy()
+    z_values = np.ndarray((len(x_values), len(y_values)))
+
+    # To plot quadratic segments separately
+    # z_values1 = np.ndarray((len(x_values), len(y_values)))
+    # z_values2 = np.ndarray((len(x_values), len(y_values)))
+
+    for i in range(0, len(x_values)):
+        for j in range(0, len(y_values)):
+            x = np.array([[x_values[i]], [y_values[j]]])
+            # z_values1[i][j] = x.T @ P[0] @ x
+            # z_values2[i][j] = x.T @ P[1] @ x
+            for k in range(4):
+                if (E[k] @ x >= 0.0).all():
+                    z_values[i][j] = x.T @ P[k] @ x
+                    break
+
+    contours = plt.contour(x_values, y_values, z_values, levels=contour_levels, cmap='Greys')
+    # contours1 = plt.contour(x_values, y_values, z_values1, levels=contour_levels, alpha=alpha,
+    # linestyles='dashed', cmap='Reds')
+    # contours2 = plt.contour(x_values, y_values, z_values2, levels=contour_levels, alpha=alpha,
+    # linestyles='dashed', cmap='Blues')
+
+    # TRAJECTORIES
+    initial_values = [np.array(i) for i in initial_values]
+    trajectories = []
+    for x_0 in initial_values:
+        trajectories.append({"x": [], "y": []})
+        x = x_0
+
+        # Euler iterations in time, to generate trajectory
+        for t in range(50000):
+            trajectories[-1]["x"].append(x[0])
+            trajectories[-1]["y"].append(x[1])
+
+            if x[0]*x[1] >= 0:
+                x_dot = A1 @ x
+            else:
+                x_dot = A2 @ x
+
+            x = x + x_dot * delta
+
+    for trajectory in trajectories:
+        line = plt.plot(trajectory['x'], trajectory['y'])[0]
+        add_arrow(line)
+
+    plt.xlim([-size/2, size/2])
+    plt.ylim([-size / 2, size / 2])
+    plt.show()
+    return
 
 
 # Function borrowed from https://stackoverflow.com/questions/34017866/arrow-on-a-line-plot-with-matplotlib
