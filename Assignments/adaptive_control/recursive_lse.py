@@ -11,11 +11,11 @@ from labellines import labelLine, labelLines
 from parameter_id_classes import Estimator_RLS
 
 
-def measure(regressors, params, noise_cov):
+def measure(regressors, params, noise_cov=0.0):
     """
     :param regressors: [y(t-1), u(t-1), u(t-2)] as Numpy array
     :param params: [a, b_1, b_2]
-    :param noise: noise
+    :param noise_cov: noise covariance
     :return: y(t)
     """
     return float(regressors.T @ params + noise(noise_cov))
@@ -25,7 +25,7 @@ def noise(noise_cov):
     return s.multivariate_normal.rvs(cov=noise_cov)
 
 
-def input_signal(t, period, amplitude=1.0):
+def square_wave_discrete(t, period, amplitude=1.0):
     if t%period<period*0.5:
         return amplitude
     else:
@@ -39,7 +39,7 @@ def simulate(estimator_init, total_time=200, noise_cov=0.0, input_period=100, in
     params = np.array([[a], [b_1], [b_2]])
 
     # Initialization
-    regressors = np.array([[0.0], [input_signal(0, input_period, input_amp)], [0.0]])
+    regressors = np.array([[0.0], [square_wave_discrete(0, input_period, input_amp)], [0.0]])
     estimator = Estimator_RLS(estimator_init["P"], estimator_init["params"], estimator_init["f_factor"])
     measurement_history = [0.0]
     estimate_history = [estimator.regress(regressors)]
@@ -58,7 +58,7 @@ def simulate(estimator_init, total_time=200, noise_cov=0.0, input_period=100, in
         # For next time-step
         regressors[0] = -1*y_t
         regressors[2] = regressors[1]
-        regressors[1] = input_signal(t, input_period, input_amp)
+        regressors[1] = square_wave_discrete(t, input_period, input_amp)
 
     history = {"Measurements": measurement_history, "Estimates": estimate_history, "Parameters": parameter_history}
     return history

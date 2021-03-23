@@ -2,7 +2,7 @@ import numpy as np
 from copy import deepcopy
 
 F_FACTOR_0 = 0.75
-GAMMA_MAX_EIG = 50.0
+EIG_LIMIT = 10000.0
 
 estimator_init_default = {
     "Gamma": np.identity(4),
@@ -15,16 +15,19 @@ class Estimator_RLS:
     """
     Rec. Least Squares (for recursive_lse.py)
     """
-    def __init__(self, P=None, params=None, f_factor=None):
+    def __init__(self, P=None, params=None, f_factor=None, eig_limit=None):
         self.P = np.array(P) if P is not None else np.identity(3)
-        self.params = np.array(params) if params else [[0.0], [0.0], [0.0]]
+        self.dim = np.shape(self.P)[0]
+        self.params = np.array(params) if params is not None else [[0.0], [0.0], [0.0]]
         self.f_factor = f_factor if f_factor else 1.0
+        self.eig_limit = eig_limit if eig_limit else EIG_LIMIT
 
     def update_P(self, regressors):
         Gamma = (1/self.f_factor) * self.P
-        self.P = Gamma @(np.identity(3) - regressors @ np.linalg.inv(
-            1 + regressors.T @ Gamma @ regressors
-        )@ regressors.T @ Gamma)
+        P = Gamma @(np.identity(self.dim) - regressors @ np.linalg.inv(
+            1 + regressors.T @ Gamma @ regressors)@ regressors.T @ Gamma)
+
+        self.P = P if np.max(np.linalg.eigvals(P)) < 3 * self.eig_limit else self.P
 
     def update_params(self, regressors, measurement):
         prior_error = measurement - self.regress(regressors)
@@ -40,7 +43,7 @@ class Estimator_RLS_EE:
     """
     def __init__(self, Gamma=None, params=None, f_factor=None):
         self.Gamma = np.array(Gamma) if Gamma is not None else estimator_init_default["Gamma"]
-        self.params = np.array(params) if params else estimator_init_default["params"]
+        self.params = np.array(params) if params is not None else estimator_init_default["params"]
         self.f_factor = f_factor if f_factor else estimator_init_default["f_factor"]
         self.regressors = np.array([[0.0], [0.0], [0.0], [0.0]])
 
@@ -53,7 +56,7 @@ class Estimator_RLS_EE:
         self.regressors = deepcopy(regressors)
 
         Gamma = (1/self.f_factor) * (self.Gamma - (1/(1 + regressors.T @ self.Gamma @ regressors)) * self.Gamma @ regressors @ regressors.T @ self.Gamma)
-        self.Gamma = Gamma if np.max(np.linalg.eigvals(Gamma)) < GAMMA_MAX_EIG else self.Gamma  # Covariance Limiting
+        self.Gamma = Gamma if np.max(np.linalg.eigvals(Gamma)) < EIG_LIMIT else self.Gamma  # Covariance Limiting
         self.f_factor = F_FACTOR_0*self.f_factor + 1 - F_FACTOR_0  # Variable forgetting factor, Lambda_1 = Lambda_2
 
     def update_params(self, measurement):
@@ -87,7 +90,7 @@ class Estimator_ARMAX:
 
     def update_Gamma(self, regressors):
         Gamma = (1/self.f_factor) * (self.Gamma - (1/(1 + self.regressors.T @ self.Gamma @ self.regressors)) * self.Gamma @ self.regressors @ self.regressors.T @ self.Gamma)
-        self.Gamma = Gamma if np.max(np.linalg.eigvals(Gamma)) < GAMMA_MAX_EIG else self.Gamma  # Covariance Limiting
+        self.Gamma = Gamma if np.max(np.linalg.eigvals(Gamma)) < EIG_LIMIT else self.Gamma  # Covariance Limiting
         self.f_factor = F_FACTOR_0*self.f_factor + 1 - F_FACTOR_0  # Variable forgetting factor, Lambda_1 = Lambda_2
 
     def update_params(self, measurement):
@@ -123,7 +126,7 @@ class Estimator_ARMAX5:
         Gamma = (1 / self.f_factor) * (self.Gamma - (1 / (
                     1 + self.regressors.T @ self.Gamma @ self.regressors)) * self.Gamma @ self.regressors @ self.regressors.T @ self.Gamma)
         self.Gamma = Gamma if np.max(
-            np.linalg.eigvals(Gamma)) < GAMMA_MAX_EIG else self.Gamma  # Covariance Limiting
+            np.linalg.eigvals(Gamma)) < EIG_LIMIT else self.Gamma  # Covariance Limiting
         self.f_factor = F_FACTOR_0 * self.f_factor + 1 - F_FACTOR_0  # Variable forgetting factor, Lambda_1 = Lambda_2
 
     def update_params(self, measurement):
