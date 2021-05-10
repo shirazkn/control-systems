@@ -4,32 +4,10 @@ Estimating parameters of system y(t) + a y(t-1) = b1 u(t-1) + b2 u(t-2) + e(t)
 on-line in the presence of Gaussian noise e(t), u(t) is a square wave
 '''
 import numpy as np
-import scipy.stats as s
 import matplotlib.pyplot as plt
-from copy import deepcopy
 from labellines import labelLine, labelLines
-from parameter_id_classes import Estimator_RLS
-
-
-def measure(regressors, params, noise_cov=0.0):
-    """
-    :param regressors: [y(t-1), u(t-1), u(t-2)] as Numpy array
-    :param params: [a, b_1, b_2]
-    :param noise_cov: noise covariance
-    :return: y(t)
-    """
-    return float(regressors.T @ params + noise(noise_cov))
-
-
-def noise(noise_cov):
-    return s.multivariate_normal.rvs(cov=noise_cov)
-
-
-def square_wave_discrete(t, period, amplitude=1.0):
-    if t%period<period*0.5:
-        return amplitude
-    else:
-        return 0.0
+from linear_regression_classes import Estimator_RLS
+from control_library import measure, square_wave_discrete
 
 
 def simulate(estimator_init, total_time=200, noise_cov=0.0, input_period=100, input_amp=1.0):
@@ -76,6 +54,7 @@ def plot_estimates(history, axis =None):
    axis.plot(history["Measurements"], 'r--', label="$y(t)$")
    axis.plot(history["Estimates"], color='black', label="$\hat y(t)$")
    return axis
+
 
 def plot_parameters(history, axis = None):
     param_his = history["Parameters"]

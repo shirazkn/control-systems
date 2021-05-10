@@ -12,20 +12,17 @@ Parameters (DSTR) := [-s0_tilde, -s1_tilde, r0_tilde, r1_tilde]
 
 from scipy import signal
 import numpy as np
-from parameter_id_classes import Estimator_RLS
-from recursive_lse import measure
-from matplotlib import pyplot as plt
 from copy import deepcopy
+
+from linear_regression_classes import Estimator_RLS
+from control_library import measure, column, square_wave_continuous, Linear_Motor_Continuous, discretize_linear_motor, \
+    CASES
 
 EPSILON = 1e-9  # Threshold value for estimated b_0 to avoid divide-by-0
 
-
-def column(vector):
-    """
-    Recast 1d array into into a column vector
-    """
-    vector = np.array(vector)
-    return vector.reshape(len(vector), 1)
+# ------------------------------------------------------------------------------------------- #
+# --------------------------------------- CONTROLLERS --------------------------------------- #
+# ------------------------------------------------------------------------------------------- #
 
 
 def controller_istr_zc(_regressors, est_params, mod_params, obs_params):
@@ -129,24 +126,9 @@ def controller_dstr(_regressors, est_params, mod_params, obs_params):
     return float(((mod_params[2])*_uc + (mod_params[3])*_uc_m1 + (-est_params[3])*_u_m1
                  + (est_params[0])*_y + (est_params[1])*_y_m1)/est_params[2])
 
-
-def square_wave(t, period=0.6, amplitude=0.2):
-    if not int(t/period) % 2:
-        return amplitude
-    else:
-        return 0.0
-
-
-def plant_sim(y, y_dot, u, params, duration, dt_plant):
-    M_e, B, A_sc, kf = params
-
-    for i in range(0, int(duration/dt_plant)):
-        sat_kf_y = np.clip(kf*y_dot, -1, 1)
-        y_ddot = -(B/M_e)*y_dot - (A_sc/M_e)*sat_kf_y + u/M_e
-        y_dot = y_dot + dt_plant*y_ddot
-        y = y + dt_plant*y_dot
-
-    return y, y_dot
+# -------------------------------------------------------------------------------------------- #
+# ---------------------------------------- SIMULATION ---------------------------------------- #
+# -------------------------------------------------------------------------------------------- #
 
 
 def simulate(total_time=2.0, case=1, method='direct', plant_model='discrete', has_friction=False,
@@ -165,53 +147,33 @@ def simulate(total_time=2.0, case=1, method='direct', plant_model='discrete', ha
     dt_plant = 1.0/100000 if plant_model == "continuous" else dt
     assert np.isclose(dt % dt_plant, 0, atol=0.0001)
 
-    # Choice of system parameters is broken down into cases
-    if case == 1:
-        M_e = 0.025
-        B = 0.1
-        A_sc = 0.1
-    elif case == 2:
-        M_e = 0.085
-        B = 0.35
-        A_sc = 0.15
-    else:
-        raise ValueError
-
+    # Choice of system parameters as tuple (Me, B, A_sc, kf)
+    params_cont = CASES[case]
     if not has_friction:
-        A_sc = 0.0
-
-    kf = 1000
+        params_cont[2] = 0.0
 
     # Model parameters
     n_freq = 15
     damping = 1
 
     # Discretized Transfer Functions
-    TF = signal.cont2discrete(([0, 0, 1], [M_e, B, 0]), dt=dt)
-    # ^Used for controller design, and to simulate the plant if plant_model == "discrete"
-    ZPK = signal.tf2zpk(TF[0], TF[1])
-    TF_model = signal.cont2discrete(([0, 0, n_freq**2], [1, 2*damping*n_freq, n_freq**2]), dt=dt)
-    ZPK_model = signal.tf2zpk(TF_model[0], TF_model[1])
+    
+    b0, b1, a1, a2 = discretize_linear_motor(continuous_TF=([0, 0, 1],
+                                                            [params_cont[0], params_cont[1], 0]), dt=dt)
+    bm0, bm1, am1, am2 = discretize_linear_motor(continuous_TF=([0, 0, n_freq**2],
+                                                                [1, 2*damping*n_freq, n_freq**2]), dt=dt)
+    b0est, b1est, a1est, a2est = discretize_linear_motor(continuous_TF=([0, 0, 1], [0.055, 0.225, 0]), dt=dt)
 
-    b0 = TF[0][0][1]
-    b1 = TF[0][0][2]
-    a1 = TF[1][1]
-    a2 = TF[1][2]
-    bm0 = TF_model[0][0][1]
-    bm1 = TF_model[0][0][2]
-    am1 = TF_model[1][1]
-    am2 = TF_model[1][2]
-    params = np.array([[a1], [a2], [b0], [b1]])
+    params_disc = np.array([[a1], [a2], [b0], [b1]])
     obs_params = None
-    TF_est0 = signal.cont2discrete(([0, 0, 1], [0.055, 0.225, 0]), dt=dt)
 
     if method == "indirect" or "indirect-dr":
         _A0 = signal.cont2discrete(([1, 100], [1, 0, 1]), dt=dt)
         a01 = -1*signal.tf2zpk(_A0[0][0], _A0[1])[0][0]
         obs_params = [a01]
-        bm_pr = float((1 + am1 + am2) / (TF_est0[0][0][1] + TF_est0[0][0][2]))
-        bm0 = bm_pr * TF_est0[0][0][1]
-        bm1 = bm_pr * TF_est0[0][0][2]
+        bm_pr = float((1 + am1 + am2) / (b0est + b1est))
+        bm0 = bm_pr * b0est
+        bm1 = bm_pr * b1est
 
         if method == "indirect":
             print("Using indirect STR without zero-cancellation")
@@ -240,23 +202,25 @@ def simulate(total_time=2.0, case=1, method='direct', plant_model='discrete', ha
 
     # Initialization
     if method == "direct":
-        est_params = column([TF_est0[1][1] - am1, TF_est0[1][2] - am2, TF_est0[0][0][1], TF_est0[0][0][2]])
+        est_params = column([a1est - am1, a2est - am2, b0est, b1est])
     else:
-        est_params = column([TF_est0[1][1], TF_est0[1][2], TF_est0[0][0][1], TF_est0[0][0][2]])
+        est_params = column([a1est, a2est, b0est, b1est])
 
+    # First two time-steps computed manually
     estimator = Estimator_RLS(P=P_init * np.identity(4), params=est_params, f_factor=f_factor, eig_limit=eig_limit)
-    u_0 = controller((square_wave(0.0), 0.0, 0.0, 0.0, 0.0), est_params, mod_params, obs_params)
+    u_0 = controller((square_wave_continuous(0.0), 0.0, 0.0, 0.0, 0.0), est_params, mod_params, obs_params)
     regressors_1 = np.array([[-0.0], [-0.0], [u_0], [0.0]])
-    y_1 = measure(regressors_1, params)
-    u_1 = controller((square_wave(dt), square_wave(0.0), u_0, y_1, 0.0), est_params, mod_params, obs_params)
+    y_1 = measure(regressors_1, params_disc)
+    u_1 = controller((square_wave_continuous(dt), square_wave_continuous(0.0), u_0, y_1, 0.0), est_params, mod_params,
+                     obs_params)
     regressors = column([-y_1, -0.0, u_1, u_0])
     regressors_m1 = column([-0.0, -0.0, u_0, 0.0])
     control_input = u_1
 
     if plant_model == "continuous":
-        y, y_dot = plant_sim(0.0, 0.0, u_0, (M_e, B, A_sc, kf), duration=dt, dt_plant=dt_plant)
+        plant = Linear_Motor_Continuous(params=params_cont, dt=dt_plant)
+        plant.iterate(duration=dt, control_input=u_0)
     elif plant_model == "discrete":
-        y = y_1
         if has_friction:
             print("Coulomb friction has only been implemented for continuous plant model. Terminating...")
             raise NotImplementedError
@@ -266,8 +230,8 @@ def simulate(total_time=2.0, case=1, method='direct', plant_model='discrete', ha
     # For Plotting
     times = [0, dt]
     measurement_history = [0.0, y_1]
-    reference_outputs = [0.0, measure(column([0.0, 0.0, square_wave(0.0), 0.0]), mod_params)]
-    reference_inputs = [square_wave(dt), 0.0]
+    reference_outputs = [0.0, measure(column([0.0, 0.0, square_wave_continuous(0.0), 0.0]), mod_params)]
+    reference_inputs = [square_wave_continuous(dt), 0.0]
     controller_history = [u_0, u_1]
     estimate_history = [0.0, estimator.regress(regressors_1)]
     parameter_history = [estimator.params, estimator.params]
@@ -277,10 +241,12 @@ def simulate(total_time=2.0, case=1, method='direct', plant_model='discrete', ha
     for k in range(2, int(total_time/dt)):
         times.append(k*dt)
 
+        # Simulate plant
         if plant_model == "discrete":
-            y = measure(regressors, params, noise_cov=0.0)
+            y = measure(regressors, params_disc, noise_cov=0.0)
         else:
-            y, y_dot = plant_sim(y, y_dot, control_input, (M_e, B, A_sc, kf), duration=dt, dt_plant=dt_plant)
+            plant.iterate(duration=dt, control_input=control_input)
+            y = plant.y
 
         measurement_history.append(y)
 
@@ -292,7 +258,7 @@ def simulate(total_time=2.0, case=1, method='direct', plant_model='discrete', ha
             estimate_history.append(estimator.regress(regressors))  # Not exactly relevant!
             parameter_history.append([-1 * estimator.params[0], -1 * estimator.params[1],
                                       estimator.params[2], estimator.params[3]])
-            controller_regressors = (square_wave(k * dt), square_wave((k - 1) * dt), controller_history[-1],
+            controller_regressors = (square_wave_continuous(k * dt), square_wave_continuous((k - 1) * dt), controller_history[-1],
                                      measurement_history[-1], measurement_history[-2])
 
         elif method == "indirect-dr":
@@ -302,7 +268,7 @@ def simulate(total_time=2.0, case=1, method='direct', plant_model='discrete', ha
             # estimator.update_params(regressors, y)
             estimate_history.append(estimator.regress(regressors))
             parameter_history.append(estimator.params)
-            controller_regressors = (square_wave(k * dt), square_wave((k - 1) * dt), controller_history[-1],
+            controller_regressors = (square_wave_continuous(k * dt), square_wave_continuous((k - 1) * dt), controller_history[-1],
                                      controller_history[-2], measurement_history[-1], measurement_history[-2],
                                      measurement_history[-3])
         else:
@@ -310,7 +276,7 @@ def simulate(total_time=2.0, case=1, method='direct', plant_model='discrete', ha
             estimator.update_params(regressors, y)
             estimate_history.append(estimator.regress(regressors))
             parameter_history.append(estimator.params)
-            controller_regressors = (square_wave(k * dt), square_wave((k - 1) * dt), controller_history[-1],
+            controller_regressors = (square_wave_continuous(k * dt), square_wave_continuous((k - 1) * dt), controller_history[-1],
                                      measurement_history[-1], measurement_history[-2])
 
         # For next time-step
@@ -322,82 +288,21 @@ def simulate(total_time=2.0, case=1, method='direct', plant_model='discrete', ha
         regressors[2] = control_input
         controller_history.append(control_input)
 
-        mod_regressors = column([-1*reference_outputs[-1], -1*reference_outputs[-2],
-                                 square_wave((k-1)*dt), square_wave((k-2)*dt)])
-        reference_inputs.append(square_wave((k-1)*dt))
+        mod_regressors = column([-1 * reference_outputs[-1], -1 * reference_outputs[-2],
+                                 square_wave_continuous((k - 1) * dt), square_wave_continuous((k - 2) * dt)])
+        reference_inputs.append(square_wave_continuous((k - 1) * dt))
         reference_outputs.append(measure(mod_regressors, mod_params))
 
         if DEBUGGING:
             import pdb; pdb.set_trace()
 
     if method == "direct":
-        true_params = column([am1-a1, am2-a2, b0, b1])
-    else:
-        true_params = params
+        params_disc = column([am1-a1, am2-a2, b0, b1])
 
     history = {"Measurements": measurement_history, "Estimates": estimate_history, "Parameters": parameter_history,
-               "ControlInputs": controller_history, "TrueParameters": true_params, "Method": method,
+               "ControlInputs": controller_history, "TrueParameters": params_disc, "Method": method,
                "ReferenceOutputs": reference_outputs, "ReferenceInputs": reference_inputs,
                "Time": times
                }
 
     return history
-
-
-def plot_results(history, measurements=True, errors=True, controls=True, params=True,
-                 xlim_params=None, ylim_params=None):
-    if measurements:
-        plt.plot(history["Time"], history["Measurements"], color='black', label="System State ($y$)")
-        plt.plot(history["Time"], history["ReferenceOutputs"], 'r--', label="Ref. Model Output ($y_m$)")
-        plt.plot(history["Time"], history["ReferenceInputs"], 'g-', label="Ref. Model Input ($u_m$)")
-
-        plt.xlabel("Time")
-        plt.legend()
-        plt.show()
-
-    if errors:
-        plt.plot(history["Time"], [y - ym for y,ym in zip(history["Measurements"], history["ReferenceOutputs"])],
-                 color='black', label=r"Tracking Error ($y - y_m$)")
-        plt.axhline(0.0, linestyle="--", color='black')
-        plt.ylabel(r"Tracking Error ($y - y_m$)")
-        plt.xlabel("Time")
-        plt.show()
-
-    if controls:
-        plt.plot(history["Time"], history["ControlInputs"], color="blue")
-        plt.axhline(0.0, linestyle="--", color='black')
-        plt.ylabel("Control Input")
-        plt.xlabel("Time")
-        plt.show()
-
-    if params:
-        parameters = history["Parameters"]
-        true_params = history["TrueParameters"]
-        colors = ["red", "orange", "blue", "green"]
-        labels = []
-        for i in range(np.size(history["Parameters"][0])):
-            labels.append("Estimate of ")
-
-        if history["Method"] == "indirect":
-            labels[0] += r"$a_1$"
-            labels[1] += r"$a_2$"
-            labels[2] += r"$b_0$"
-            labels[3] += r"$b_1$"
-
-        if history["Method"] == "direct":
-            labels[0] += r"$\tilde{s_0}$"
-            labels[1] += r"$\tilde{s_1}$"
-            labels[2] += r"$\tilde{r_0}$"
-            labels[3] += r"$\tilde{r_1}$"
-
-        for i in range(np.size(history["Parameters"][0])):
-            plt.plot(history["Time"], [float(ps[i]) for ps in parameters], color=colors[i], label=labels[i])
-            plt.axhline(true_params[i], linestyle="--", color=colors[i])
-
-        if xlim_params:
-            plt.xlim(0, xlim_params)
-        if ylim_params:
-            plt.ylim(ylim_params[0], ylim_params[1])
-
-        plt.legend()
-        plt.show()

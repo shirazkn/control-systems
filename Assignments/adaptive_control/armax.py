@@ -8,10 +8,11 @@ Use `%load_ext autoreload; %autoreload 2` to turn auto-reload on in iPython!
 '''
 
 import numpy as np
-import scipy.stats as s
 import matplotlib.pyplot as plt
 from copy import deepcopy
-import parameter_id_classes as classes
+import linear_regression_classes as classes
+from control_library import noise, square_wave_discrete2sided, noise
+
 
 Estimators = {
     "Equation_Error": classes.Estimator_RLS_EE,
@@ -29,19 +30,8 @@ def measure(regressors, params, noise_regressors, noise_params):
     :return: y(t)
     """
     noise_regressors[1] = deepcopy(noise_regressors[0])
-    noise_regressors[0] = [noise()]
+    noise_regressors[0] = [noise(noise_cov=1.0)]
     return float(regressors.T @ params + noise_regressors.T @ noise_params)
-
-
-def noise(noise_cov=1.0):
-    return s.multivariate_normal.rvs(cov=noise_cov)
-
-
-def input_signal(t, period, amplitude=1.0):
-    if t%period<period*0.5:
-        return amplitude*0.5
-    else:
-        return -amplitude*0.5
 
 
 def simulate(estimator_type=None, simulation_case=None, total_time=200, input_period=100, input_amp=1.0):
@@ -61,8 +51,8 @@ def simulate(estimator_type=None, simulation_case=None, total_time=200, input_pe
         assert 0
 
     # Initialization
-    regressors = np.array([[0.0], [input_signal(0, input_period, input_amp)], [0.0], [0.0]])
-    noise_regressors = np.array([[noise()], [0.0]])
+    regressors = np.array([[0.0], [square_wave_discrete2sided(0, input_period, input_amp)], [0.0], [0.0]])
+    noise_regressors = np.array([[noise(noise_cov=1.0)], [0.0]])
     estimator = Estimators[estimator_type]()
 
     print(f"Using {estimator_type} model with simulation parameters c1={noise_params[0]} "
@@ -85,7 +75,7 @@ def simulate(estimator_type=None, simulation_case=None, total_time=200, input_pe
         regressors[0] = -1*y_t
         regressors[3] = regressors[2]
         regressors[2] = regressors[1]
-        regressors[1] = input_signal(t, input_period, input_amp)
+        regressors[1] = square_wave_discrete2sided(t, input_period, input_amp)
 
     history = {"Measurements": measurement_history, "Estimates": estimate_history, "Parameters": parameter_history,
                "True_Parameters": params, "True_Noise_Parameters": noise_params, "Estimator_Type": estimator_type}
@@ -101,26 +91,6 @@ def plot_estimates(history):
     plt.show()
     return
 
-
-def check_pe(order=4, time=800, sqwave_period=100, sqwave_amplitude=5.0):
-    # Regressors used to check Persistent Excitation condition :-
-    pe_vectors = [[[input_signal(i, sqwave_period, sqwave_amplitude)] for i in range(order)][::-1]]
-    pe_min = 10000.0
-    pe_max = 0.0
-
-    for t in range(order, time):
-        # Make a copy of first vector
-        pe_vectors.insert(0, (deepcopy(pe_vectors[0])))
-
-        # Shift & update first vector
-        pe_vectors[0].pop()
-        pe_vectors[0].insert(0, [input_signal(t, period=sqwave_period, amplitude=sqwave_amplitude)])
-
-    pe_eigvals = np.linalg.eigvals(sum([np.array(r) @ np.array(r).T for r in pe_vectors]))
-    pe_min = np.min([np.min(pe_eigvals), pe_min])
-    pe_max = np.max([np.max(pe_eigvals), pe_max])
-
-    print(f"Minimum eigenvalue of PE matrix was {pe_min}, max eigenvalue was {pe_max}.")
 
 def plot_parameters(history):
     cs = ['blue', 'red', 'green', 'purple']
