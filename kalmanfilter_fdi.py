@@ -1,4 +1,5 @@
 import numpy as np
+from numpy.linalg import inv
 from scipy.stats import multivariate_normal
 import matplotlib.pyplot as plt
 from copy import deepcopy
@@ -20,6 +21,7 @@ for case in cases:
     xs = []
     xhs = []
     xhts = []
+    xhtrs = []
     N = 10  # Time-steps between consecutive low-rate updates
     N = case["N"] if "N" in case.keys() else 10
 
@@ -104,6 +106,11 @@ for case in cases:
             [0, 1, 0, 0]
         ])
 
+        D = np.array([
+            [1, 0],
+            [0, 1]
+        ])
+
         A = LTV_Matrix([A1, A2], modes)
         V = LTV_Matrix([V1, V1], modes)
         W = LTV_Matrix([W1, W1], modes)
@@ -112,10 +119,10 @@ for case in cases:
         CL = LTV_Matrix([CL1, CL1], modes)
 
         # Initialization of Riccati Sequence
-        P = [5.0*np.identity(4)]
+        P = [0.001*np.identity(4)]
         P_single = deepcopy(P)
 
-        Beta = 1.0
+        Beta = 2.0
         a_upper = max(np.hstack([np.linalg.eigvals(A1), np.linalg.eigvals(A2)]))
         a_lower = min(np.hstack([np.linalg.eigvals(A1), np.linalg.eigvals(A2)]))
         cL_upper = max(np.linalg.svd(CL1)[1])
@@ -188,28 +195,19 @@ for case in cases:
         P_single.pop();  # Remove extra entry at the end
 
         #  Initialization for simulation
-        x_hat = [np.array([[0.5], [1.0], [10.0], [10.0]])]
-        x_hat_single = deepcopy(x_hat)
+        x = [np.array([[0.02], [0.02], [15.0], [15.0]])]
+
+        x_hat = [np.array([[0.0], [0.0], [15.0], [15.0]])]
         x_hat_tilde = deepcopy(x_hat)
-        x_hat_tilde_single = deepcopy(x_hat)
-        x = [np.array([[0.0], [0.0], [15.0], [15.0]])]
+        x_hat_tilde_robust = deepcopy(x_hat)
         y = []
         yL = []
         yL_tilde = []
-        Da = []
+        a = []
 
 
         def state_transition(x, k):
             return A.get(k) @ x + noise(V.get(k))
-
-
-        def est_transition(xh, k, y, yL=None):
-            if yL is None:
-                return A.get(k) @ xh + A.get(k) @ K[k]  @ (y - C.get(k) @ xh)
-            else:
-                return (A.get(k) @ xh + A.get(k) @ K[k] @ (y - C.get(k) @ xh)
-                        + A.get(k) @ KL[k] @ (yL - CL.get(k) @ xh))
-
 
         def measurement(x, k):
             return C.get(k) @ x + noise(W.get(k))
@@ -220,7 +218,7 @@ for case in cases:
                 if attack is None:
                     return CL.get(k) @ x + noise(WL.get(k))
                 else:
-                    return CL.get(k) @ x + noise(WL.get(k)) + attack
+                    return CL.get(k) @ x + noise(WL.get(k)) + D@attack
             else:
                 return None
 
@@ -232,7 +230,6 @@ for case in cases:
             else:
                 return None
 
-
         def make_attack_optimal(k):
             if if_LR_update(k):
                 if k - N >= 0:
@@ -240,32 +237,57 @@ for case in cases:
                     for i in range(k+1, k+N-1):
                         Phi_CL = A.get(i) @ (np.identity(np.shape(A.get(i))[0]) - K[i] @ C.get(i)) @ Phi_CL
                     A_CL_k = A.get(k) @ (np.identity(np.shape(A.get(k))[0]) - K[k] @ C.get(k) - KL[k] @ CL.get(k))
-                    AKD = A.get(k) @ KL[k]
+                    AKD = A.get(k) @ KL[k] @ D
 
-                    a = cvx.Variable(2)
+                    _a = cvx.Variable(2)
                     _dele = x_hat_tilde[k] - x_hat[k]
-                    obj = cvx.norm(Phi_CL @ (AKD @ a + (A_CL_k @ _dele)[:, 0]))
-                    opt_prob = cvx.Problem(cvx.Maximize(obj), [cvx.norm(a) <= Beta])
+                    obj = cvx.norm(Phi_CL @ (AKD @ _a + (A_CL_k @ _dele)[:, 0]))
+                    opt_prob = cvx.Problem(cvx.Maximize(obj), [cvx.norm(_a) <= Beta])
                     opt_prob.solve(method='dccp')
-                    return column(a.value)
+                    return column(_a.value)
                 else:
                     make_attack(k)
             else:
                 return None
 
+        def estimate_attack(k):
+            _D = np.block([ [np.zeros([2, 2])], [D] ])
+            _C = np.block([[C.get(k)], [CL.get(k)]])
+            _W = np.block([[W.get(k), np.zeros([2, 2])], [np.zeros([2, 2]), WL.get(k)]])
+            R = _C @ P[k] @ _C.T + _W
+            ah = inv(_D.T @ inv(R) @ _D) @ _D.T @ inv(R) @ (np.block([y[k].T, yL_tilde[k].T]).T - _C @ x_hat_tilde_robust[k])
+            # import pdb;
+            # pdb.set_trace()
+            return ah
+
+
+        def est_transition(xh, k, y, yL=None):
+            if yL is None:
+                return A.get(k) @ xh + A.get(k) @ K[k]  @ (y - C.get(k) @ xh)
+            else:
+                return (A.get(k) @ xh + A.get(k) @ K[k] @ (y - C.get(k) @ xh)
+                        + A.get(k) @ KL[k] @ (yL - CL.get(k) @ xh))
+
+        def est_transition_robust(xh, k, y, yL=None):
+            if yL is None:
+                return A.get(k) @ xh + A.get(k) @ K[k] @ (y - C.get(k) @ xh)
+            else:
+                ah = estimate_attack(k)
+                return (A.get(k) @ xh + A.get(k) @ K[k] @ (y - C.get(k) @ xh)
+                        + A.get(k) @ KL[k] @ (yL - D@ah - CL.get(k) @ xh))
 
         # Simulation
         for k, mode in enumerate(modes[:total_time_simulation]):
             y.append(measurement(x[k], k))
             yL.append(measurementL(x[k], k, attack=None))
-            Da.append(make_attack_optimal(k))
-            yL_tilde.append(measurementL(x[k], k, attack=Da[k]))
+            a.append(make_attack_optimal(k))
+            yL_tilde.append(measurementL(x[k], k, attack=a[k]))
 
             # Set <k+1>th entry
             x_hat.append(est_transition(x_hat[k], k, y[k], yL[k]))
             x_hat_tilde.append(est_transition(x_hat_tilde[k], k, y[k], yL_tilde[k]))
+            x_hat_tilde_robust.append(est_transition_robust(x_hat_tilde_robust[k], k, y[k], yL_tilde[k]))
             x.append(state_transition(x[k], k))
-
 
         alpha = 0.1
         dele = x_hat[0] - x_hat_tilde[0]
@@ -311,20 +333,26 @@ for case in cases:
         xs.append(x)
         xhs.append(x_hat)
         xhts.append(x_hat_tilde)
+        xhtrs.append(x_hat_tilde_robust)
 
     errors = []
     errors_af = []
+    errors_r = []
     for sim in range(n_sims):
         errors.append([np.linalg.norm(xht - x) for xht, x in zip(xhts[sim], xs[sim])])
         errors_af.append([np.linalg.norm(xh - x) for xh, x in zip(xhs[sim], xs[sim])])
+        errors_r.append([np.linalg.norm(xhtr - x) for xhtr, x in zip(xhtrs[sim], xs[sim])])
 
     errors = np.array(errors)
     errors_af = np.array(errors_af)
+    errors_r = np.array(errors_r)
     errors_avg = []
     errors_af_avg = []
+    errors_r_avg = []
     for i in range(len(errors[0])):
         errors_avg.append(np.average(errors[:, i]))
         errors_af_avg.append(np.average(errors_af[:, i]))
+        errors_r_avg.append(np.average(errors_r[:, i]))
 
     biases = []
     for sim in range(n_sims):
@@ -340,16 +368,18 @@ for case in cases:
 
 PLOT1 = True
 PLOT2 = False
-PLOT3 = False
+PLOT3 = True
 PLOT4 = False
-PLOT5 = True
+PLOT5 = False
 
 if PLOT1:
     plt.plot([x[0] for x in x], [x[1] for x in x], linestyle="-", color="black", label="System State")
     plt.plot([x[0] for x in x_hat], [x[1] for x in x_hat], linestyle="dashed", color="green",
-             label="DRKF Estimate (without Attack)")
+             label="DRKF Estimate (No Attack)")
     plt.plot([x[0] for x in x_hat_tilde], [x[1] for x in x_hat_tilde], linestyle="dotted", color="red",
-             label="DRKF Estimate (with Attack)")
+             label="DRKF Estimate (without Attack Estimation)")
+    plt.plot([x[0] for x in x_hat_tilde_robust], [x[1] for x in x_hat_tilde_robust], '--', color="blue",
+             label="DRKF Estimate (with Attack Estimation)")
     plt.xlabel(r'$x_1(k)$')
     plt.ylabel(r'$x_2(k)$')
     plt.legend()
@@ -370,8 +400,9 @@ if PLOT2:
 
 if PLOT3:
     # plt.plot([np.linalg.norm(xh-x) for xh, x in zip(x_hat, x)]); plt.show()
-    plt.plot(errors_avg, color='black', label=r"Estimation Error ($\|\tilde e_k\|$)")
-    plt.plot(biases_avg, linestyle='--', color='blue', label=r"Bias in Estimation Error ($\|\Delta e_k\|$)")
+    plt.plot(errors_af_avg, linestyle='dashed', color='green', label=r"Est. Error Attack-free ($\|\Delta e_k\|$)")
+    plt.plot(errors_avg, linestyle='dotted', color='red', label=r"Est. Error without Attack Estimation ($\|\tilde e_k\|$)")
+    plt.plot(errors_r_avg, '--', color='blue', label=r"Est. Error with Attack Estimation")
     plt.legend(loc="upper right")
     # plt.legend(prop={'family': 'Times New Roman'})
     plt.ylabel("Mean Squared Estimation Error")
